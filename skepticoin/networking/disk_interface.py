@@ -1,4 +1,5 @@
 import os
+import io
 from skepticoin.networking.params import MAX_CONNECTION_ATTEMPTS
 from typing import Dict, List, Set, Tuple
 from skepticoin.datatypes import Transaction
@@ -7,9 +8,10 @@ from skepticoin.networking.remote_peer import (
 )
 import json
 import urllib.request
-import pickle
+import sqlite3
 from skepticoin.humans import human
 from skepticoin.coinstate import CoinState
+from skepticoin.serialization import stream_serialize_list
 
 
 PEER_URLS: List[str] = [
@@ -74,12 +76,59 @@ class DiskInterface:
 
             self.last_saved_peers = db
 
-    def write_chain_cache_to_disk(self, coinstate: CoinState) -> None:
-        # Currently this takes about 2 seconds. It could be optimized further
-        # if we switch to an appendable file format for the cache.
-        with open('chain.cache.tmp', 'wb') as file:
-            coinstate.dump(lambda data: pickle.dump(data, file))
-        os.replace('chain.cache.tmp', 'chain.cache')
+    def write_chain_to_disk(self, coinstate: CoinState, path: str = 'chain.db') -> None:
+        if not os.path.isfile(path):
+            print("Creating new database: " + path)
+            con = sqlite3.connect(path)
+            cur = con.cursor()
+            cur.execute('''CREATE TABLE chain (
+                hash blob primary key,
+                version int,
+                height int,
+                previous_block_hash blob,
+                merkle_root_hash blob,
+                timestamp int,
+                target blob,
+                nonce int,
+                summary_hash blob,
+                chain_sample blob,
+                block_hash blob,
+                transactions blob
+            )''')
+            con.close()
+
+        try:
+            con = sqlite3.connect(path)
+            cur = con.cursor()
+            for hash in coinstate.block_by_hash.keys():
+                check = cur.execute("select count(*) from chain where hash=:hash", {"hash": hash}).fetchall()
+                if check[0][0] == 0:
+                    block = coinstate.block_by_hash[hash]
+                    with io.BytesIO() as buffer:
+                        stream_serialize_list(buffer, block.transactions)
+                        buffer.seek(0)
+                        transactions = buffer.read()
+                    cur.execute("insert into chain values (?,?,?,?,?,?,?,?,?,?,?,?)", (
+                        hash,
+                        block.header.version,
+                        block.header.summary.height,
+                        block.header.summary.previous_block_hash,
+                        block.header.summary.merkle_root_hash,
+                        block.header.summary.timestamp,
+                        block.header.summary.target,
+                        block.header.summary.nonce,
+                        block.header.pow_evidence.summary_hash,
+                        block.header.pow_evidence.chain_sample,
+                        block.header.pow_evidence.block_hash,
+                        transactions
+                    ))
+            con.commit()
+
+        except Exception as e:
+            print('Failed to save blockchain to disk: ' + str(e))
+            return
+        finally:
+            con.close()
 
     def save_transaction_for_debugging(self, transaction: Transaction) -> None:
         with open("/tmp/%s.transaction" % human(transaction.hash()), 'wb') as f:

@@ -4,14 +4,17 @@ from pathlib import Path
 from time import sleep, time
 from typing import Any, Optional
 import os
+import io
 import tempfile
 import logging
 import argparse
 import pickle
+import sqlite3
 
-from skepticoin.datatypes import Block
+from skepticoin.datatypes import Block, BlockHeader, BlockSummary, PowEvidence, Transaction
 from skepticoin.coinstate import CoinState
 from skepticoin.networking.threading import NetworkingThread
+from skepticoin.serialization import stream_deserialize_list
 from skepticoin.wallet import Wallet, save_wallet
 from skepticoin.humans import computer, human
 
@@ -41,15 +44,44 @@ def wait_for_fresh_chain(thread: NetworkingThread) -> None:
         sleep(10)
 
 
-def read_chain_from_disk() -> CoinState:
-    if os.path.isfile('chain.cache'):
-        print("Reading cached chain")
-        with open('chain.cache', 'rb') as file:
-            coinstate = CoinState.load(lambda: pickle.load(file))
-    else:
-        coinstate = CoinState.zero()
+def read_chain_from_disk(path: str = 'chain.db') -> CoinState:
 
     rewrite = False
+
+    if os.path.isfile(path):
+        print("Reading chain database")
+        con = sqlite3.connect(path)
+        cur = con.cursor()
+        block_by_hash = {}
+        for row in cur.execute("""select
+                height, previous_block_hash, merkle_root_hash, timestamp, target, nonce,
+                summary_hash, chain_sample, block_hash,
+                transactions
+                from chain"""):
+            summary = BlockSummary(height=row[0],
+                                   previous_block_hash=row[1],
+                                   merkle_root_hash=row[2],
+                                   timestamp=row[3],
+                                   target=row[4],
+                                   nonce=row[5])
+            pow_evidence = PowEvidence(summary_hash=row[6],
+                                       chain_sample=row[7],
+                                       block_hash=row[8])
+            header = BlockHeader(summary, pow_evidence)
+            transactions = stream_deserialize_list(io.BytesIO(row[9]), Transaction)
+            block = Block(header, transactions)
+            block_by_hash[block.hash()] = block
+
+        coinstate = CoinState.load(lambda: block_by_hash)
+        con.close()
+
+    elif os.path.isfile('chain.cache'):
+        print("Reading cached chain in legacy format")
+        with open('chain.cache', 'rb') as file:
+            coinstate = CoinState.load(lambda: pickle.load(file))
+        rewrite = True
+    else:
+        coinstate = CoinState.zero()
 
     if os.path.isdir('chain'):
         # the code below is no longer needed by normal users, but some old testcases still rely on it:
@@ -81,7 +113,15 @@ def read_chain_from_disk() -> CoinState:
                 rewrite = True
 
     if rewrite:
-        DiskInterface().write_chain_cache_to_disk(coinstate)
+        print("Rewriting chain in database format")
+        DiskInterface().write_chain_to_disk(coinstate)
+        # cleanup some old files
+        if os.path.isfile('chain.cache'):
+            print("Deleting old legacy chain.cache file")
+            os.remove('chain.cache')
+        if os.path.isfile('chain.cache.tmp'):
+            print("Deleting old temporary chain.cache.tmp file")
+            os.remove('chain.cache.tmp')
 
     return coinstate
 
