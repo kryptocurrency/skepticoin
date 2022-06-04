@@ -157,23 +157,22 @@ class ChainManager(Manager):
         if not self.should_actively_fetch_blocks(current_time):
             return  # no manual action required, blocks expected to be sent to us instead.
 
+        self.actively_fetching_blocks_from_peers = [
+            (timeout_at, p)
+            for (timeout_at, p) in self.actively_fetching_blocks_from_peers
+            if current_time < timeout_at and not inventory_batch_handled(p) and not p.closed]
+
+        if len(self.actively_fetching_blocks_from_peers) > MAX_IBD_PEERS:
+            return
+
+        # at this point len(self.actively_fetching_blocks_from_peers) == 0
+
         ibd_candidates = [
             peer for peer in self.local_peer.network_manager.get_active_peers()
             if current_time > peer.last_empty_inventory_response_at + EMPTY_INVENTORY_BACKOFF
         ]
 
         if len(ibd_candidates) == 0:
-            return
-
-        # TODO note that if a peer disconnects, it is never removed from actively_fetching_blocks_from_peers, which
-        # means that your IBD will be stuck until it times out. Not the best but it will recover eventually at least.
-        self.actively_fetching_blocks_from_peers = [
-            (timeout_at, p)
-            for (timeout_at, p) in self.actively_fetching_blocks_from_peers
-            if current_time < timeout_at and
-            not inventory_batch_handled(p)]
-
-        if len(self.actively_fetching_blocks_from_peers) > MAX_IBD_PEERS:
             return
 
         get_blocks_message = self.get_get_blocks_message()
