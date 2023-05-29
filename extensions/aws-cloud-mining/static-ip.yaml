@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Automatically create and re-use Static IP Addresses for EC2 instances.
+  This template creates a Lambda and registers an event that runs on EC2
+  instance state change to 'running'. There are no interdependencies between
+  this and other templates, so deployment is entirely optional.
+
+Resources:
+
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: MyEipManager
+      Runtime: python3.10
+      Role: !GetAtt 'LambdaExecutionRole.Arn'
+      Handler: index.lambda_handler
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+
+          def lambda_handler(event, context):
+              region_name = event['region']
+              instance_id = event['detail']['instance-id']
+
+              client = boto3.client('ec2', region_name=region_name)
+
+              addresses_dict = client.describe_addresses()
+
+              reusable_eip = None
+              reusable_eip_association_id = None
+              for eip_dict in addresses_dict['Addresses']:
+                  if 'InstanceId' not in eip_dict or eip_dict['InstanceId'] == '':
+                      reusable_eip = eip_dict['PublicIp']
+                  elif eip_dict['InstanceId'] == instance_id:
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps('Instance already has an EIP')
+                      }
+                  else:
+                      try:
+                          instance_status = client.describe_instance_status(InstanceIds=[eip_dict['InstanceId']])
+                          if instance_status['InstanceStatuses'][0]['InstanceState']['Name'] != 'running':
+                              reusable_eip = eip_dict['PublicIp']
+                              reusable_eip_association_id = eip_dict['AssociationId']
+                      except Exception as e:
+                          # Handle if the instance is not found
+                          print(f"Error: {str(e)}")
+                          reusable_eip = eip_dict['PublicIp']
+                          reusable_eip_association_id = eip_dict['AssociationId']
+
+              if reusable_eip is not None:
+                  # Disassociate the EIP from the non-running or missing instance
+                  try:
+                    client.disassociate_address(AssociationId=reusable_eip_association_id)
+                  except Exception as e:
+                    print(f"Error disassociating address (ignored): {str(e)}")
+              else:
+                  # Allocate a new Elastic IP
+                  eip = client.allocate_address(Domain='vpc')
+                  reusable_eip = eip['PublicIp']
+
+              # Associate the Elastic IP with the instance
+              response = client.associate_address(
+                  InstanceId=instance_id,
+                  PublicIp=reusable_eip
+              )
+
+              return {
+                  'statusCode': 200,
+                  'body': f"Successfully associated {reusable_eip} with {instance_id}"
+              }
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: ec2policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'ec2:DescribeAddresses'
+            - 'ec2:DescribeInstanceStatus'
+            - 'ec2:AssociateAddress'
+            - 'ec2:AllocateAddress'
+            - 'ec2:DisassociateAddress'
+            Resource: '*'
+
+  MyLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MyLambdaFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'MyEventRule.Arn'
+
+  MyEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: Ec2InstanceStateChange
+      Description: A CloudWatch Events rule that triggers on EC2 instance state change to running
+      EventPattern:
+        source:
+        - 'aws.ec2'
+        detail-type:
+        - 'EC2 Instance State-change Notification'
+        detail:
+          state:
+          - 'running'
+      State: ENABLED
+      Targets:
+      - Id: '1'
+        Arn: !GetAtt 'MyLambdaFunction.Arn'

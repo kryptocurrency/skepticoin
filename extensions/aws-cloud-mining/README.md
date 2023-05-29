@@ -33,9 +33,13 @@ Despite being generally a bad idea, there are a couple of scenarios when you mig
     - Click Next, Next, then Create Stack. Click the *Outputs* tab and note down the names of the Public and Private Buckets
     - Navigate to the AWS S3 Service. Go to the Public Bucket and upload `peers.json` and `chain.db`
     - Go to the Private Bucket and upload your `wallet.json`.
-5. Deploy `compute.yaml`
+5. Optional: Deploy `static-ip.yaml` now if you want Static IP Addresses.
+    - Click 'Create Stack' -> 'with new resources' -> 'Upload a template file' and select `static-ip.yaml` from your computer
+    - Review the Parameters (there aren't any!).
+    - Click Next, Next, then Create Stack.
+6. Deploy `compute.yaml`
     - Click 'Create Stack' -> 'with new resources' -> 'Upload a template file' and select `compute.yaml` from your computer
     - Review the Parameters.
     - Click Next, Next, then Create Stack.
-6. Monitoring status
+7. Monitoring status
     -  In the AWS Console, navigate over to Cloud Watch -> Log Groups to view logs from the mining instances.
