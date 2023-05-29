@@ -182,42 +182,14 @@ Resources:
               # This script contains the primary "workload" of the node. It installs and then runs skepticoin-mine.
               content: !Sub |
                 #!/bin/bash -xe
+                mkdir -p $(dirname $LOG)
+                exec 2>&1 > $LOG
+                echo "$(date): InstanceType=${InstanceType}"
+
                 cd /home/ec2-user
-                mkdir -p /var/log/skepticoin
-                LOG=/var/log/skepticoin/skepticoin-mine.log
-                echo "InstanceType=${InstanceType}" >> $LOG
-
-                # install python infrastructure
-                amazon-linux-extras install python3.8
-                /usr/bin/python3.8 -m venv ./venv
-                . ./venv/bin/activate
-                yum install -y "@Development tools" python3-pip python38-devel blas-devel gcc-gfortran lapack-devel
-                python3.8 -m pip install --upgrade pip
-
-                # install skepticoin from source
+                yum install -y git
                 git clone --single-branch --branch ${GitBranch} ${GitRepo}
-                cd skepticoin
-                pip3.8 install -r requirements.txt
-                python3.8 setup.py install
-
-                # prepare skepticoin run-time environment
-                mkdir -p /home/ec2-user/runtime
-                cd /home/ec2-user/runtime
-                aws s3 cp s3://$PRIVATE_BUCKET/wallet.json .
-                aws s3 cp s3://$PUBLIC_BUCKET/chain.db .
-
-                # Publish IP addresses back into peers.json
-                aws ec2 describe-instances --region ${AWS::Region} --filters "Name=tag:Name,Values=skepticoin-miner" "Name=instance-state-name,Values=running" --query 'Reservations[].Instances[].[PublicIpAddress]' --output json | python -c "import sys, json; print(json.dumps([[row[0], 2412, 'OUTGOING'] for row in json.load(sys.stdin)]))" | aws s3 cp --content-type application/json --acl public-read - s3://$PUBLIC_BUCKET/peers.json
-
-                # Set things up to start skepticoin-mine on reboot. Reboot daily, publish chain.db.
-                crontab <<EOF
-                @reboot . /home/ec2-user/venv/bin/activate && cd /home/ec2-user/runtime && PYTHONUNBUFFERED=1 skepticoin-mine ${SkepticoinMiningParams} >> $LOG 2>&1; sleep 1800 && /sbin/reboot
-                0 0 * * * echo 'killall skepticoin-mine; sleep 30; cd /home/ec2-user/runtime && aws s3 sync . s3://$PUBLIC_BUCKET/ --exclude "*" --include chain.db; /sbin/reboot' | at "\$(shuf -i 0-23 -n 1):\$(shuf -i 0-59 -n 1)"
-                EOF
-
-                # start mining
-                echo "rebooting to start miner"
-                /sbin/reboot
+                exec /bin/bash -xe ./skepticoin/extensions/aws-cloud-mining/install_$(uname -m).sh
 
               owner: ec2-user
               group: ec2-user
@@ -227,6 +199,9 @@ Resources:
               env:
                 PRIVATE_BUCKET: !ImportValue "PrivateWalletBucket"
                 PUBLIC_BUCKET: !ImportValue "PublicBucket"
+                AWS_REGION: !Ref AWS::Region
+                SKEPTICOIN_MINING_PARAMS: !Ref SkepticoinMiningParams
+                LOG: /var/log/skepticoin/skepticoin-mine.log
               command: /home/ec2-user/workload
 
     Properties:
